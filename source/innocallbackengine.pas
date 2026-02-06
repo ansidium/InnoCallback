@@ -1,104 +1,157 @@
-unit innocallbackengine;
+unit InnoCallbackEngine;
 
 interface
 
+uses
+  System.Classes;
+
+function WrapCallback(Proc: TMethod; ParamCount: Integer): NativeInt; stdcall;
+
 implementation
 
-uses sysutils, asminline, windows;
+uses
+  ASMInline,
+  System.Generics.Collections;
 
-var memory: array of pointer;
+var
+  GInliners: TList<Pointer>;
+  GInlinersLock: TObject;
 
-(*function testcallback(callback:pointer; paramcount:integer):integer; stdcall;
-asm
-  MOV EAX, [ebp+8] //callback
-  MOV ECX, [ebp+12]  //paramcount
-
-  AND ECX, ECX
-
-  @@loop:
-   JZ @@exit
-
-   PUSH ECX
-   DEC ECX
-  JMP @@loop
-
-  @@exit:
-
-   CALL EAX
-end;       *)
-
-function WrapCallback(proc: TMethod; paramcount: integer): longword; stdcall;
-var inliner: TASMInline;
-  swapfirst, swaplast: integer;
+procedure RegisterInliner(const InlinerPtr: Pointer);
 begin
-{On entry:
- STACK
-  retptr
-  a
-  b
-  c
-  d
-
-We want:
-  STACK
-  retptr
-  d
-  c
-  eax=self
-  edx=a
-  ecx=b
-}
-
-  inliner := TASMInline.create;
-
+  TMonitor.Enter(GInlinersLock);
   try
-    inliner.Pop(eax); //get the retptr off the stack
-
-    swapfirst := 2;
-    swaplast := paramcount-1;
-
-    //Reverse the order of parameters from param3 onwards in the stack
-    while (swaplast > swapfirst) do begin
-      inliner.Mov(ecx, inliner.addr(esp, swapfirst * 4)); //load the first item of the pair
-      inliner.Mov(edx, inliner.addr(esp, swaplast * 4)); //load the last item of the pair
-      inliner.Mov(inliner.addr(esp, swapfirst * 4), edx);
-      inliner.Mov(inliner.addr(esp, swaplast * 4), ecx);
-      inc(swapfirst);
-      dec(swaplast);
-    end;
-
-    if paramcount >= 1 then
-      inliner.pop(edx); //load param1
-    if paramcount >= 2 then
-      inliner.pop(ecx); //load param2
-
-    inliner.Push(eax); //put the retptr back onto the stack
-
-    inliner.Mov(eax, longword(tmethod(proc).data)); //Load the self ptr
-
-    inliner.Jmp(tmethod(proc).code); //jump to the wrapped proc
-
-    setlength(memory, length(memory) + 1);
-    memory[high(memory)] := inliner.SaveAsMemory;
-    result := longword(memory[high(memory)]);
+    GInliners.Add(InlinerPtr);
   finally
-    inliner.free;
+    TMonitor.Exit(GInlinersLock);
   end;
 end;
 
-exports wrapcallback name 'wrapcallback'(*,
- testcallback name 'testcallback'*);
-
-procedure killinliners;
-var i: integer;
+function WrapCallback(Proc: TMethod; ParamCount: Integer): NativeInt; stdcall;
+var
+  Inliner: TASMInline;
+  SwapFirst: Integer;
+  SwapLast: Integer;
+  ExtraParams: Integer;
+  FrameSize: Integer;
+  I: Integer;
+  SrcOffset: Integer;
+  DestOffset: Integer;
+  InlinerPtr: Pointer;
 begin
-  for i := 0 to high(memory) do
-    FreeMem(memory[i]);
-  setlength(memory, 0);
+  { Для совместимости внешнего ABI возвращаем 0, если входные параметры некорректны. }
+  if (not Assigned(Proc.Code)) or (ParamCount < 0) then
+    Exit(0);
+
+  Inliner := TASMInline.Create;
+  try
+{$IFDEF CPUX86}
+    { Снимаем адрес возврата, чтобы перестроить стек под вызов Delphi-метода. }
+    Inliner.Pop(EAX);
+
+    { Начиная с третьего параметра разворачиваем порядок на стеке,
+      чтобы он соответствовал внутреннему ABI Delphi-метода на x86. }
+    SwapFirst := 2;
+    SwapLast := ParamCount - 1;
+    while SwapLast > SwapFirst do
+    begin
+      Inliner.Mov(ECX, Inliner.Addr(ESP, SwapFirst * SizeOf(Pointer)));
+      Inliner.Mov(EDX, Inliner.Addr(ESP, SwapLast * SizeOf(Pointer)));
+      Inliner.Mov(Inliner.Addr(ESP, SwapFirst * SizeOf(Pointer)), EDX);
+      Inliner.Mov(Inliner.Addr(ESP, SwapLast * SizeOf(Pointer)), ECX);
+      Inc(SwapFirst);
+      Dec(SwapLast);
+    end;
+
+    { Первые два параметра метода Delphi передаются через EDX/ECX. }
+    if ParamCount >= 1 then
+      Inliner.Pop(EDX);
+    if ParamCount >= 2 then
+      Inliner.Pop(ECX);
+
+    Inliner.Push(EAX);
+    Inliner.Mov(EAX, Cardinal(NativeUInt(Proc.Data)));
+    Inliner.Jmp(Proc.Code);
+{$ELSE}
+    { Win64 callback получает параметры в RCX/RDX/R8/R9.
+      Перекладываем их в формат, который ожидает вызов метода Delphi:
+      RCX=Self, RDX/R8/R9=первые 3 параметра, остальные на стеке. }
+    Inliner.MovRegReg(R11, RCX);
+    Inliner.MovRegReg(R10, RDX);
+    Inliner.MovRegReg(RAX, R8);
+    Inliner.MovRegReg(RDX, R9);
+
+    ExtraParams := ParamCount - 3;
+    if ExtraParams < 0 then
+      ExtraParams := 0;
+
+    { Выделяем shadow space и область для «хвоста» параметров. }
+    FrameSize := 32 + ExtraParams * SizeOf(Pointer);
+    if (FrameSize and $F) = 0 then
+      Inc(FrameSize, 8); { Сохраняем 16-байтное выравнивание стека перед call. }
+
+    Inliner.SubRsp(FrameSize);
+
+    if ParamCount >= 4 then
+      Inliner.MovMemRSPReg(32, RDX);
+
+    if ParamCount > 4 then
+    begin
+      for I := 0 to ParamCount - 5 do
+      begin
+        { 40 байт: адрес возврата + shadow space вызывающей стороны. }
+        SrcOffset := FrameSize + 40 + I * SizeOf(Pointer);
+        DestOffset := 32 + (I + 1) * SizeOf(Pointer);
+        Inliner.MovRegMemRSP(RDX, SrcOffset);
+        Inliner.MovMemRSPReg(DestOffset, RDX);
+      end;
+    end;
+
+    Inliner.MovRegImm64(RCX, UInt64(NativeUInt(Proc.Data)));
+    Inliner.MovRegReg(RDX, R11);
+    if ParamCount >= 2 then
+      Inliner.MovRegReg(R8, R10);
+    if ParamCount >= 3 then
+      Inliner.MovRegReg(R9, RAX);
+
+    Inliner.MovRegImm64(R10, UInt64(NativeUInt(Proc.Code)));
+    Inliner.CallReg(R10);
+    Inliner.AddRsp(FrameSize);
+    Inliner.Ret;
+{$ENDIF}
+
+    InlinerPtr := Inliner.SaveAsMemory;
+    RegisterInliner(InlinerPtr);
+    Result := NativeInt(InlinerPtr);
+  finally
+    Inliner.Free;
+  end;
 end;
 
-initialization
-finalization
-  killinliners;
-end.
+procedure FreeInliners;
+var
+  I: Integer;
+begin
+  TMonitor.Enter(GInlinersLock);
+  try
+    for I := 0 to GInliners.Count - 1 do
+      FreeMem(GInliners[I]);
+    GInliners.Clear;
+  finally
+    TMonitor.Exit(GInlinersLock);
+  end;
+end;
 
+exports
+  WrapCallback name 'wrapcallback';
+
+initialization
+  GInliners := TList<Pointer>.Create;
+  GInlinersLock := TObject.Create;
+
+finalization
+  FreeInliners;
+  GInlinersLock.Free;
+  GInliners.Free;
+
+end.

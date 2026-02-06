@@ -2,1331 +2,551 @@ unit ASMInline;
 
 interface
 
-{ASM Inliner
- Nicholas Sherlock
+{$IFNDEF CPUX86}
+{$IFNDEF CPUX64}
+{$MESSAGE ERROR 'ASMInline поддерживает только x86/x64'}
+{$ENDIF}
+{$ENDIF}
 
- This is incomplete, I've only implemented enough to support InnoCallback.
+{$IFDEF CPUX86}
+{$WARN IMPLICIT_INTEGER_CAST_LOSS OFF}
+{$WARN IMPLICIT_CONVERSION_LOSS OFF}
+{$ENDIF}
 
- Instructions are stored in a TMemoryStream internally
-
- Instructions usually accept some combination of Registers, Immediates and
- Memory References. Memory References can either be of the simple form [EAX]
- (Where [EAX] is really a Delphi set), or the user can build the address with
- the TASMInline.addr() function. It'd be nice to have a function which builds
- the address from a string, too, allowing the more intuitive '[EAX+EBX*4+1000]'
- style.
-
- The generation of instruction-relative addresses generates Relocations, using
- SaveToMemory() automatically rebases using the relocations to make these correct
- in the final block of memory.
-
-  !!!! Not all special cases have been implemented in WriteRegRef().
-}
-
-uses Sysutils, windows, classes, contnrs;
+uses
+  System.Classes,
+  System.Generics.Collections,
+  System.SysUtils,
+  Winapi.Windows;
 
 type
+{$IFDEF CPUX86}
   TModMode = (mmNaked, mmDeref, mmDisp8, mmDisp32);
-
   TRegister32 = (EAX, EBX, ECX, EDX, ESP, EBP, ESI, EDI);
-  TRegister32Set = set of TRegister32;
-  TRegister16 = (AX, BX, CX, DX, SP, BP, SI, DI);
-  TRegister16Set = set of TRegister16;
-  TRegister8 = (AH, AL, BH, BL, CH, CL, DH, DL);
-
-  TCLRegister = CL..CL;
-
   TMemSize = (ms8, ms16, ms32, ms64);
 
   TMemoryAddress = record
-    size: TMemSize;
-    usebase: boolean;
-    base, index: TRegister32;
-    offset: integer;
-    scale: byte;
+    Size: TMemSize;
+    UseBase: Boolean;
+    Base: TRegister32;
+    Index: TRegister32;
+    Offset: Integer;
+    Scale: Byte;
   end;
 
-  EOperandSizeMismatch = class(exception)
+  EOperandSizeMismatch = class(Exception)
   public
-    constructor create;
+    constructor Create;
   end;
 
   TRelocType = (rt32Bit);
 
   TReloc = class
   public
-    position: longword;
-    relocType: TRelocType;
+    Position: Cardinal;
+    RelocType: TRelocType;
   end;
-
-  TLabelRef = class
-  public
-    labelname: string;
-    position: longword;
-    delta: integer;
-    labelType: TRelocType;
-  end;
-
-  TLabel = class
-  public
-    name: string;
-    position: longword;
-  end;
-
-  TLabelList = class
-  private
-    flabels: TStringList;
-  public
-    constructor create;
-    destructor Destroy; override;
-    function GetLabel(const name: string): TLabel;
-    function AddLabel(const name: string; position: longword): Boolean;
-    procedure Clear;
-  end;
+{$ELSE}
+  TRegister64 = (RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI, R8, R9, R10, R11, R12, R13, R14, R15);
+{$ENDIF}
 
   TASMInline = class
   private
-    fbuffer: TMemoryStream;
-    frelocs, flabelrefs: TObjectList;
-    flabels: TLabelList;
-    fbase: longword;
-    procedure ResolveLabels;
-
-    procedure AddRelocation(position: longword; relocType: TRelocType);
-    procedure AddLabelRef(position: longword; delta: integer; relocType: TRelocType; const labelname: string);
-
-    function GetReloc(index: integer): TReloc;
-    function RelocCount: integer;
-    property Relocs[index: integer]: TReloc read GetReloc;
-
-    procedure WriteByte(b: byte);
-    procedure WriteWord(w: word);
-    procedure WriteInteger(i: integer);
-    procedure WriteLongWord(l: longword);
-    procedure WriteOpSizeOverride;
-    procedure WriteRegRef(reg: byte; base: TRegister32; deref: boolean; index: TRegister32; Offset: integer; Scale: byte; usebase: boolean); overload;
-    procedure WriteRegRef(mem: TMemoryAddress; reg: TRegister8); overload;
-    procedure WriteRegRef(mem: TMemoryAddress; reg: TRegister16); overload;
-    procedure WriteRegRef(mem: TMemoryAddress; reg: TRegister32); overload;
-    procedure WriteRegRef(mem: TMemoryAddress; opcodeext: byte); overload;
-    procedure WriteRegRef(reg1: TRegister8; opcodeext: byte); overload;
-    procedure WriteRegRef(reg1: TRegister16; opcodeext: byte); overload;
-    procedure WriteRegRef(reg1: TRegister32; opcodeext: byte); overload;
-    procedure WriteRegRef(reg1: TRegister8; reg2: TRegister8); overload;
-    procedure WriteRegRef(reg1: TRegister16; reg2: TRegister16); overload;
-    procedure WriteRegRef(reg1: TRegister32; reg2: TRegister32); overload;
-    procedure WriteRegRef(reg: TRegister32; base: TRegister32; deref: boolean; index: TRegister32 = EAX; Offset: integer = 0; Scale: byte = 0; usebase: boolean = true); overload;
+    FBuffer: TMemoryStream;
+{$IFDEF CPUX86}
+    FRelocs: TObjectList<TReloc>;
+    FBase: NativeUInt;
+    procedure AddRelocation(const Position: Cardinal; const RelocType: TRelocType);
+    function GetReloc(const Index: Integer): TReloc;
+    function RelocCount: Integer;
+    property Relocs[const Index: Integer]: TReloc read GetReloc;
+    procedure Relocate(const Base: Pointer);
+    procedure WriteRegRef(const Reg: Byte; const Base: TRegister32; const Deref: Boolean;
+      const Index: TRegister32; const Offset: Integer; const Scale: Byte; const UseBase: Boolean); overload;
+    procedure WriteRegRef(const Mem: TMemoryAddress; const Reg: TRegister32); overload;
+    procedure WriteRegRef(const Reg: TRegister32; const Base: TRegister32; const Deref: Boolean;
+      const Index: TRegister32 = EAX; const Offset: Integer = 0; const Scale: Byte = 0;
+      const UseBase: Boolean = True); overload;
+{$ELSE}
+    function RegCode(const R: TRegister64): Byte;
+    procedure WriteREX(const W, R, X, B: Boolean);
+{$ENDIF}
+    procedure WriteByte(const B: Byte);
+    procedure WriteInteger(const I: Integer);
+{$IFNDEF CPUX86}
+    procedure WriteUInt64(const U: UInt64);
+{$ENDIF}
   public
-    function Size: integer;
-
-    procedure Clear;
-
-    procedure Execute;
-
-    procedure Relocate(base: pointer);
-
-    function SaveAsMemory: pointer;
-    procedure SaveToMemory(target: pointer);
-
-    constructor create;
+    constructor Create;
     destructor Destroy; override;
 
-    function Addr(base: TRegister32; index: TRegister32; scale: Byte = 1; offset: integer = 0; size: TMemSize = ms32): TMemoryAddress; overload;
-    function Addr(base: TRegister32; size: TMemSize = ms32): TMemoryAddress; overload;
-    function Addr(base: TRegister32; offset: Integer; size: TMemSize = ms32): TMemoryAddress; overload;
-    function Addr(offset: integer; index: TRegister32; scale: Byte = 1; size: TMemSize = ms32): TMemoryAddress; overload;
-    function Addr(offset: Integer; size: TMemSize = ms32): TMemoryAddress; overload;
+    function SaveAsMemory: Pointer;
+    function Size: Integer;
 
-    //RET
-    procedure Ret; overload;
-    //RET imm8
-    procedure Ret(w: Word); overload;
+{$IFDEF CPUX86}
+    function Addr(const Base: TRegister32; const Offset: Integer; const Size: TMemSize = ms32): TMemoryAddress;
 
-    //PUSH imm
-    procedure Push(lw: longword); overload;
-    //PUSH reg
-    procedure Push(reg: TRegister16); overload;
-    procedure Push(reg: TRegister32); overload;
-    //PUSH [reg]
-    procedure Push(mem: TRegister32Set); overload;
-    //PUSH mem
-    procedure Push(mem: TMemoryAddress); overload;
+    procedure Push(const Reg: TRegister32);
+    procedure Pop(const Reg: TRegister32);
 
-    //POP reg
-    procedure Pop(reg: TRegister32);
+    procedure Jmp(const Target: Pointer);
 
-    procedure doLabel(const name: string);
-
-    //DB imm8
-    procedure db(b: byte);
-    //DW imm16
-    procedure dw(w: word);
-    //DD imm32
-    procedure dd(dw: longword);
-
-    //CALL [reg]
-    procedure Call(reg: TRegister32); overload;
-    //CALL rel32
-    procedure Call(target: pointer); overload;
-
-    //JUMP rel32
-    procedure Jmp(target: pointer); overload;
-    //JUMP label
-    procedure Jmp(const labelname: string); overload;
-
-    //MOV reg, imm
-    procedure Mov(reg: TRegister8; b: byte); overload;
-    procedure Mov(reg: TRegister16; b: word); overload;
-    procedure Mov(reg: TRegister32; b: longword); overload;
-    //MOV reg, reg
-    procedure Mov(reg1: TRegister8; reg2: TRegister8); overload;
-    procedure Mov(reg1: TRegister16; reg2: TRegister16); overload;
-    procedure Mov(reg1: TRegister32; reg2: TRegister32); overload;
-    //MOV reg, [reg] and MOV [reg], reg
-    procedure Mov(reg1: TRegister32; reg2: TRegister32Set); overload;
-    procedure Mov(reg1: TRegister32Set; reg2: TRegister32); overload;
-    //MOV [reg], imm
-    procedure Mov(reg1: TRegister32Set; i: longword); overload;
-    //MOV mem, imm
-    procedure Mov(mem: TMemoryAddress; i: longword); overload;
-    //MOV reg, mem and MOV mem, reg
-    procedure Mov(mem: TMemoryAddress; reg: TRegister32); overload;
-    procedure Mov(mem: TMemoryAddress; reg: TRegister16); overload;
-    procedure Mov(mem: TMemoryAddress; reg: TRegister8); overload;
-    procedure Mov(reg: TRegister32; mem: TMemoryAddress); overload;
-    procedure Mov(reg: TRegister16; mem: TMemoryAddress); overload;
-    procedure Mov(reg: TRegister8; mem: TMemoryAddress); overload;
-
-    procedure Nop;
-
-    //SHL reg, imm
-    procedure doSHL(reg: TRegister8; amount: byte); overload;
-    procedure doSHL(reg: TRegister16; amount: byte); overload;
-    procedure doSHL(reg: TRegister32; amount: byte); overload;
-    //SHL reg, CL
-    procedure doSHL(reg: TRegister8; amount: TCLRegister); overload;
-    procedure doSHL(reg: TRegister16; amount: TCLRegister); overload;
-    procedure doSHL(reg: TRegister32; amount: TCLRegister); overload;
-    //SHL mem, imm and SHL mem, CL
-    procedure doSHL(mem: TMemoryAddress; amount: byte); overload;
-    procedure doSHL(mem: TMemoryAddress; amount: TCLRegister); overload;
-
-    //SAR reg, CL
-    procedure SAR(reg: TRegister8; amount: byte); overload;
-    procedure SAR(reg: TRegister16; amount: byte); overload;
-    procedure SAR(reg: TRegister32; amount: byte); overload;
-    //SAR reg, imm
-    procedure SAR(reg: TRegister8; amount: TCLRegister); overload;
-    procedure SAR(reg: TRegister16; amount: TCLRegister); overload;
-    procedure SAR(reg: TRegister32; amount: TCLRegister); overload;
-    //SAR mem, imm and SHR mem, CL
-    procedure SAR(mem: TMemoryAddress; amount: byte); overload;
-    procedure SAR(mem: TMemoryAddress; amount: TCLRegister); overload;
-
-    //SHR reg, imm
-    procedure doSHR(reg: TRegister8; amount: byte); overload;
-    procedure doSHR(reg: TRegister16; amount: byte); overload;
-    procedure doSHR(reg: TRegister32; amount: byte); overload;
-    //SHR reg, CL
-    procedure doSHR(reg: TRegister8; amount: TCLRegister); overload;
-    procedure doSHR(reg: TRegister16; amount: TCLRegister); overload;
-    procedure doSHR(reg: TRegister32; amount: TCLRegister); overload;
-    //SHR mem, imm and SHR mem, CL
-    procedure doSHR(mem: TMemoryAddress; amount: byte); overload;
-    procedure doSHR(mem: TMemoryAddress; amount: TCLRegister); overload;
-
-    //NOT reg
-    procedure doNot(reg: TRegister8); overload;
-    procedure doNot(reg: TRegister32); overload;
-    procedure doNot(reg: TRegister16); overload;
-    //NOT mem
-    procedure doNot(mem: TMemoryAddress); overload;
+    procedure Mov(const Reg: TRegister32; const Value: Cardinal); overload;
+    procedure Mov(const Mem: TMemoryAddress; const Reg: TRegister32); overload;
+    procedure Mov(const Reg: TRegister32; const Mem: TMemoryAddress); overload;
+{$ELSE}
+    procedure MovRegReg(const Dest, Src: TRegister64);
+    procedure MovRegImm64(const Dest: TRegister64; const Value: UInt64);
+    procedure MovRegMemRSP(const Dest: TRegister64; const Disp: Integer);
+    procedure MovMemRSPReg(const Disp: Integer; const Src: TRegister64);
+    procedure SubRsp(const Amount: Integer);
+    procedure AddRsp(const Amount: Integer);
+    procedure CallReg(const Reg: TRegister64);
+    procedure Ret;
+{$ENDIF}
   end;
 
 implementation
 
-constructor TLabelList.create;
+{$IFDEF CPUX86}
+
+constructor EOperandSizeMismatch.Create;
 begin
-  flabels := TStringList.create;
-  flabels.Sorted := true;
+  inherited Create('Operand size mismatch');
 end;
 
-destructor TLabelList.destroy;
+procedure RequireSize(const TestSize, ExpectedSize: TMemSize);
 begin
-  clear;
-  flabels.free;
+  if TestSize <> ExpectedSize then
+    raise EOperandSizeMismatch.Create;
 end;
 
-function TLabelList.GetLabel(const name: string): TLabel;
-var i: integer;
+function RegisterCode(const Reg: TRegister32): Byte;
 begin
-  i := flabels.IndexOf(name);
-  if i = -1 then
-    result := nil else
-    result := TLabel(flabels.objects[i]);
-end;
-
-function TLabelList.AddLabel(const name: string; position: longword): Boolean;
-var alabel: TLabel;
-begin
-  result := flabels.indexof(name) = -1;
-  if result then begin //success
-    alabel := TLabel.create;
-    alabel.name := name;
-    alabel.position := position;
-    flabels.AddObject(name, alabel);
+  case Reg of
+    EAX: Result := 0;
+    EBX: Result := 3;
+    ECX: Result := 1;
+    EDX: Result := 2;
+    ESP: Result := 4;
+    EBP: Result := 5;
+    ESI: Result := 6;
+    EDI: Result := 7;
+  else
+    raise Exception.Create('Неизвестный регистр');
   end;
 end;
 
-procedure TLabelList.Clear;
-var t1: integer;
+function ModModeCode(const Value: TModMode): Byte;
 begin
-  for t1 := 0 to flabels.count - 1 do
-    flabels.Objects[t1].free;
-  flabels.Clear;
-end;
-
-constructor EOperandSizeMismatch.create;
-begin
-  inherited create('Operand size mismatch');
-end;
-
-{Throw an exception if test<>match. Poor man's assert().
- Could overload to add other sorts of tests}
-
-procedure require(test: TMemSize; match: TMemSize);
-begin
-  if test <> match then
-    raise EOperandSizeMismatch.create;
-end;
-
-{Check that the set has exactly one member. If it has one member, return that
- member, otherwise throw an exception}
-
-function SingleMember(regset: TRegister32Set): TRegister32;
-var r: TRegister32;
-  found: boolean;
-begin
-  found := false;
-  result:=EAX;
-  for r := low(r) to high(r) do
-    if r in regset then
-      if found then //there is more than one member in this set
-        raise exception.create('Invalid register operand') else
-      begin
-        found := true;
-        result := r;
-      end;
-  if not found then begin
-    raise exception.create('Invalid register operand');
-    end;
-end;
-
-function regnum(reg: TRegister16): byte; overload;
-begin
-  case reg of
-    AX: result := 0;
-    BX: result := 3;
-    CX: result := 1;
-    DX: result := 2;
-  else raise exception.create('Unknown register...');
+  case Value of
+    mmDeref: Result := 0;
+    mmDisp8: Result := 1;
+    mmDisp32: Result := 2;
+    mmNaked: Result := 3;
+  else
+    raise Exception.CreateFmt('Некорректный режим адресации: %d', [Ord(Value)]);
   end;
 end;
 
-function regnum(reg: TRegister32): byte; overload;
+function EncodeSIB(const Scale, IndexCode, BaseCode: Byte): Byte;
 begin
-  case reg of
-    EAX: result := 0;
-    EBX: result := 3;
-    ECX: result := 1;
-    EDX: result := 2;
-    ESP: result := 4;
-    EBP: result := 5;
-    ESI: result := 6;
-    EDI: result := 7;
-  else raise exception.create('Unknown register...');
-  end;
+  Result := Byte(BaseCode or (IndexCode shl 3) or (Scale shl 6));
 end;
 
-function regnum(reg: TRegister8): byte; overload;
+function EncodeModRM(const AMod, AReg, ARM: Byte): Byte;
 begin
-  case reg of
-    AL: result := 0;
-    BL: result := 3;
-    CL: result := 1;
-    DL: result := 2;
-    AH: result := 4;
-    BH: result := 7;
-    CH: result := 5;
-    DH: result := 6;
-  else raise exception.create('Unknown register...');
-  end;
+  Result := Byte((AMod shl 6) or (AReg shl 3) or ARM);
 end;
 
-function ModModeNum(m: TModMode): byte;
+{$ENDIF}
+
+{ TASMInline }
+
+constructor TASMInline.Create;
 begin
-  case m of
-    mmDeref: result := 0;
-    mmDisp8: result := 1;
-    mmDisp32: result := 2;
-    mmNaked: result := 3;
-  else raise exception.create('Invalid mod mode: ' + inttostr(ord(m)));
-  end;
+  inherited Create;
+  FBuffer := TMemoryStream.Create;
+{$IFDEF CPUX86}
+  FRelocs := TObjectList<TReloc>.Create(True);
+{$ENDIF}
 end;
 
-function EncodeSIB(scale, index, base: byte): byte;
+destructor TASMInline.Destroy;
 begin
-  result := base or (index shl 3) or (scale shl 6);
+{$IFDEF CPUX86}
+  FRelocs.Free;
+{$ENDIF}
+  FBuffer.Free;
+  inherited;
 end;
 
-function EncodeModRM(aMod, aReg, aRM: byte): byte; overload;
-begin
-  result := (aMod shl 6) or (areg shl 3) or aRM;
-end;
-
-function EncodeModRM(aregister: TRegister32; reg: Byte): byte; overload;
-begin
-  result := EncodeModRM(3, reg, regnum(aregister));
-end;
-
-function EncodeModRM(aregister: TRegister16; reg: Byte): byte; overload;
-begin
-  result := EncodeModRM(3, reg, regnum(aregister));
-end;
-
-function EncodeModRM(aregister: TRegister8; reg: Byte): byte; overload;
-begin
-  result := EncodeModRM(3, reg, regnum(aregister));
-end;
-
-procedure TASMInline.Execute;
-var codeBuf: pointer;
-begin
-  codeBuf := SaveAsMemory;
-  try
-    tprocedure(codeBuf);
-  finally
-    FreeMem(codeBuf);
-  end;
-end;
+{$IFDEF CPUX86}
 
 {$IFOPT R+}
-{$DEFINE RESTORER}
+{$DEFINE RESTORE_R}
 {$R-}
 {$ENDIF}
 {$IFOPT Q+}
-{$DEFINE RESTOREQ}
+{$DEFINE RESTORE_Q}
 {$Q-}
 {$ENDIF}
-
-{Resolve any unresolved references to label names into actual relative or
- absolute addresses}
-
-procedure TASMInline.ResolveLabels;
-var t1: integer;
-  labelref: TLabelRef;
-  alabel: TLabel;
-  lw: Longword;
+procedure TASMInline.Relocate(const Base: Pointer);
+var
+  OldPos: Int64;
+  Diff: Integer;
+  Orig: Integer;
+  I: Integer;
+  Reloc: TReloc;
 begin
-  for t1 := 0 to flabelrefs.count - 1 do begin
-    labelref := TLabelRef(flabelrefs[t1]);
-    alabel := flabels.GetLabel(labelref.labelname);
-    if alabel = nil then
-      raise Exception.create('Unknown label ''' + labelref.labelname + '''');
-
-    fbuffer.seek(labelref.position, soFromBeginning);
-    lw := alabel.position + labelref.delta;
-    writelongword(lw);
-
-//    AddRelocation(labelref.position,labelref.labelType);
-  end;
-
-  flabelrefs.Clear; //we have resolved all these now
-end;
-
-procedure TASMInline.Relocate(base: pointer);
-var oldpos, diff, orig: integer;
-  i: integer;
-  reloc: TReloc;
-begin
-  oldpos := fbuffer.Position;
+  OldPos := FBuffer.Position;
   try
+    Diff := -Integer(NativeUInt(Base) - FBase);
 
-    diff := -(longword(base) - fbase);
-
-    for i := 0 to RelocCount - 1 do begin
-      reloc := Relocs[i];
-      case reloc.relocType of
-        rt32Bit: begin
-            fbuffer.Seek(reloc.position, soFromBeginning);
-            fbuffer.Read(orig, sizeof(orig));
-            fbuffer.seek(-sizeof(orig), soFromCurrent);
-            orig := LongWord(orig + diff);
-            fbuffer.write(orig, sizeof(orig));
+    for I := 0 to RelocCount - 1 do
+    begin
+      Reloc := Relocs[I];
+      case Reloc.RelocType of
+        rt32Bit:
+          begin
+            FBuffer.Seek(Reloc.Position, soBeginning);
+            FBuffer.ReadBuffer(Orig, SizeOf(Orig));
+            FBuffer.Seek(-SizeOf(Orig), soCurrent);
+            Orig := Integer(Cardinal(Orig + Diff));
+            FBuffer.WriteBuffer(Orig, SizeOf(Orig));
           end;
       end;
     end;
-    fbase := longword(base);
+
+    FBase := NativeUInt(Base);
   finally
-    fbuffer.position := oldpos;
+    FBuffer.Position := OldPos;
   end;
 end;
-{$IFDEF RESTORER}
+{$IFDEF RESTORE_R}
 {$R+}
 {$ENDIF}
-{$IFDEF RESTOREQ}
- {Q+}
+{$IFDEF RESTORE_Q}
+{$Q+}
 {$ENDIF}
 
-function TASMInline.GetReloc(index: integer): TReloc;
+function TASMInline.GetReloc(const Index: Integer): TReloc;
 begin
-  result := TReloc(frelocs[index]);
+  Result := FRelocs[Index];
 end;
 
-function TASMInline.RelocCount: integer;
+function TASMInline.RelocCount: Integer;
 begin
-  result := frelocs.Count;
+  Result := FRelocs.Count;
 end;
 
-procedure TASMInline.AddLabelRef(position: longword; delta: integer; relocType: TRelocType; const labelname: string);
-var labelref: TLabelRef;
+procedure TASMInline.AddRelocation(const Position: Cardinal; const RelocType: TRelocType);
+var
+  Reloc: TReloc;
 begin
-  labelref := TLabelRef.create;
-
-  labelref.labelname := labelname;
-  labelref.position := position;
-  labelref.delta := delta;
-  labelref.labelType := relocType;
-
-  fLabelRefs.add(labelref);
+  Reloc := TReloc.Create;
+  Reloc.Position := Position;
+  Reloc.RelocType := RelocType;
+  FRelocs.Add(Reloc);
 end;
 
-procedure TASMInline.AddRelocation(position: longword; relocType: TRelocType);
-var reloc: TReloc;
+function TASMInline.Addr(const Base: TRegister32; const Offset: Integer; const Size: TMemSize): TMemoryAddress;
 begin
-  reloc := TReloc.Create;
-  reloc.position := position;
-  reloc.relocType := relocType;
-  frelocs.add(reloc);
+  Result.Base := Base;
+  Result.Scale := 0;
+  Result.Offset := Offset;
+  Result.Size := Size;
+  Result.UseBase := True;
 end;
 
-procedure TASMInline.Clear;
+procedure TASMInline.Pop(const Reg: TRegister32);
 begin
-  fbuffer.Clear;
-  frelocs.Clear;
+  WriteByte($58 + RegisterCode(Reg));
 end;
 
-function TASMInline.SaveAsMemory: pointer;
-var buf: pointer;
-  oldprotect: Cardinal;
+procedure TASMInline.Jmp(const Target: Pointer);
 begin
-  GetMem(buf, size);
-  VirtualProtect(buf, Size, PAGE_EXECUTE_READWRITE, oldprotect);
-  SaveToMemory(buf);
-  result := buf;
+  WriteByte($E9);
+  AddRelocation(Cardinal(FBuffer.Position), rt32Bit);
+  WriteInteger(Integer(NativeInt(Target) - NativeInt(FBase + NativeUInt(FBuffer.Position) + 4)));
 end;
 
-procedure TASMInline.SaveToMemory(target: pointer);
+procedure TASMInline.Push(const Reg: TRegister32);
 begin
-  ResolveLabels;
-  Relocate(target);
-  Move(fbuffer.memory^, target^, size);
+  WriteByte($50 + RegisterCode(Reg));
 end;
 
-function TASMInline.Addr(base: TRegister32; size: TMemSize = ms32): TMemoryAddress;
+procedure TASMInline.WriteRegRef(const Mem: TMemoryAddress; const Reg: TRegister32);
 begin
-  result.base := base;
-  result.usebase := true;
-  result.size := size;
-  result.offset := 0;
-  result.scale := 0; //don't use index
+  WriteRegRef(Reg, Mem.Base, True, Mem.Index, Mem.Offset, Mem.Scale, Mem.UseBase);
 end;
 
-function TASMInline.Addr(offset: integer; index: TRegister32; scale: Byte = 1; size: TMemSize = ms32): TMemoryAddress;
+procedure TASMInline.WriteRegRef(const Reg: TRegister32; const Base: TRegister32;
+  const Deref: Boolean; const Index: TRegister32; const Offset: Integer;
+  const Scale: Byte; const UseBase: Boolean);
 begin
-  result.offset := offset;
-  result.index := index;
-  result.scale := scale;
-  result.size := size;
-  result.usebase := false;
+  WriteRegRef(RegisterCode(Reg), Base, Deref, Index, Offset, Scale, UseBase);
 end;
 
-function TASMInline.Addr(base: TRegister32; offset: Integer; size: TMemSize = ms32): TMemoryAddress;
+procedure TASMInline.WriteRegRef(const Reg: Byte; const Base: TRegister32;
+  const Deref: Boolean; const Index: TRegister32; const Offset: Integer;
+  const Scale: Byte; const UseBase: Boolean);
+type
+  TOffSize = (osNone, os8, os32);
+var
+  Mode: TModMode;
+  OffSize: TOffSize;
+  UseSIB: Boolean;
+  AReg: Byte;
+  ARM: Byte;
+  LocalBase: TRegister32;
+  LocalIndex: TRegister32;
+  LocalOffset: Integer;
+  LocalScale: Byte;
 begin
-  result.base := base;
-  result.scale := 0; //don't use Index
-  result.offset := offset;
-  result.size := size;
-  result.usebase := true;
+  LocalBase := Base;
+  LocalIndex := Index;
+  LocalOffset := Offset;
+  LocalScale := Scale;
+
+  if not Deref then
+  begin
+    Mode := mmNaked;
+    OffSize := osNone;
+  end
+  else if not UseBase then
+  begin
+    OffSize := os32;
+    Mode := mmDeref;
+    LocalBase := EBP; // Специальный код x86 для адресации без базового регистра
+  end
+  else if LocalOffset = 0 then
+  begin
+    Mode := mmDeref;
+    OffSize := osNone;
+  end
+  else if (LocalOffset >= -128) and (LocalOffset < 128) then
+  begin
+    Mode := mmDisp8;
+    OffSize := os8;
+  end
+  else
+  begin
+    Mode := mmDisp32;
+    OffSize := os32;
+  end;
+
+  if Mode <> mmNaked then
+    UseSIB := (LocalScale > 0) or (LocalBase = ESP)
+  else
+    UseSIB := False;
+
+  if UseSIB then
+  begin
+    case LocalScale of
+      0:
+        LocalIndex := ESP; // Индекс не используется
+      1:
+        LocalScale := 0;
+      2:
+        LocalScale := 1;
+      4:
+        LocalScale := 2;
+      8:
+        LocalScale := 3;
+    else
+      raise Exception.Create('Допустимые значения Scale: 1, 2, 4, 8');
+    end;
+  end;
+
+  if (not UseSIB) and (Mode = mmDeref) and (LocalBase = EBP) then
+  begin
+    Mode := mmDisp8;
+    OffSize := os8;
+    LocalOffset := 0;
+  end;
+
+  ARM := RegisterCode(LocalBase);
+  AReg := Reg;
+
+  if UseSIB then
+    WriteByte(EncodeModRM(ModModeCode(Mode), AReg, 4))
+  else
+    WriteByte(EncodeModRM(ModModeCode(Mode), AReg, ARM));
+
+  if UseSIB then
+    WriteByte(EncodeSIB(LocalScale, RegisterCode(LocalIndex), RegisterCode(LocalBase)));
+
+  case OffSize of
+    os8:
+      WriteByte(Byte(LocalOffset));
+    os32:
+      WriteInteger(LocalOffset);
+  end;
 end;
 
-function TASMInline.Addr(offset: Integer; size: TMemSize = ms32): TMemoryAddress;
+procedure TASMInline.Mov(const Mem: TMemoryAddress; const Reg: TRegister32);
 begin
-  result.offset := offset;
-  result.size := size;
-  result.scale := 0; //dont use Index
-  result.usebase := true;
+  RequireSize(Mem.Size, ms32);
+  WriteByte($89);
+  WriteRegRef(Mem, Reg);
 end;
 
-function TASMInline.Addr(base: TRegister32; index: TRegister32; scale: Byte = 1; offset: integer = 0; size: TMemSize = ms32): TMemoryAddress;
+procedure TASMInline.Mov(const Reg: TRegister32; const Mem: TMemoryAddress);
 begin
-  result.base := base;
-  result.index := index;
-  result.offset := offset;
-  result.scale := scale;
-  result.size := size;
-  result.usebase := true;
+  RequireSize(Mem.Size, ms32);
+  WriteByte($8B);
+  WriteRegRef(Mem, Reg);
 end;
 
-function TASMInline.Size: integer;
+procedure TASMInline.Mov(const Reg: TRegister32; const Value: Cardinal);
 begin
-  result := fbuffer.size;
+  WriteByte($B8 + RegisterCode(Reg));
+  WriteInteger(Integer(Value));
 end;
 
-procedure TASMInline.WriteInteger(i: integer);
+{$ELSE}
+
+function TASMInline.RegCode(const R: TRegister64): Byte;
 begin
-  fbuffer.write(i, 4);
+  Result := Byte(R);
 end;
 
-procedure TASMInline.writelongword(l: longword);
+procedure TASMInline.WriteREX(const W, R, X, B: Boolean);
+var
+  Prefix: Byte;
 begin
-  fbuffer.write(l, 4);
+  Prefix := $40;
+  if W then
+    Inc(Prefix, $08);
+  if R then
+    Inc(Prefix, $04);
+  if X then
+    Inc(Prefix, $02);
+  if B then
+    Inc(Prefix, $01);
+  WriteByte(Prefix);
 end;
 
-procedure TASMInline.writeword(w: word);
+procedure TASMInline.MovRegReg(const Dest, Src: TRegister64);
+var
+  DestCode: Byte;
+  SrcCode: Byte;
 begin
-  fbuffer.write(w, 2);
+  DestCode := RegCode(Dest);
+  SrcCode := RegCode(Src);
+  WriteREX(True, SrcCode >= 8, False, DestCode >= 8);
+  WriteByte($89);
+  WriteByte(Byte($C0 or ((SrcCode and 7) shl 3) or (DestCode and 7)));
 end;
 
-procedure TASMInline.writebyte(b: byte);
+procedure TASMInline.MovRegImm64(const Dest: TRegister64; const Value: UInt64);
+var
+  DestCode: Byte;
 begin
-  fbuffer.write(b, 1);
+  DestCode := RegCode(Dest);
+  WriteREX(True, False, False, DestCode >= 8);
+  WriteByte(Byte($B8 + (DestCode and 7)));
+  WriteUInt64(Value);
 end;
 
-procedure TASMInline.WriteOpSizeOverride;
+procedure TASMInline.MovRegMemRSP(const Dest: TRegister64; const Disp: Integer);
+var
+  DestCode: Byte;
 begin
-  writebyte($66);
+  DestCode := RegCode(Dest);
+  WriteREX(True, DestCode >= 8, False, False);
+  WriteByte($8B);
+  WriteByte(Byte($84 or ((DestCode and 7) shl 3)));
+  WriteByte($24);
+  WriteInteger(Disp);
+end;
+
+procedure TASMInline.MovMemRSPReg(const Disp: Integer; const Src: TRegister64);
+var
+  SrcCode: Byte;
+begin
+  SrcCode := RegCode(Src);
+  WriteREX(True, SrcCode >= 8, False, False);
+  WriteByte($89);
+  WriteByte(Byte($84 or ((SrcCode and 7) shl 3)));
+  WriteByte($24);
+  WriteInteger(Disp);
+end;
+
+procedure TASMInline.SubRsp(const Amount: Integer);
+begin
+  WriteByte($48);
+  WriteByte($81);
+  WriteByte($EC);
+  WriteInteger(Amount);
+end;
+
+procedure TASMInline.AddRsp(const Amount: Integer);
+begin
+  WriteByte($48);
+  WriteByte($81);
+  WriteByte($C4);
+  WriteInteger(Amount);
+end;
+
+procedure TASMInline.CallReg(const Reg: TRegister64);
+var
+  RegValue: Byte;
+begin
+  RegValue := RegCode(Reg);
+  WriteREX(False, False, False, RegValue >= 8);
+  WriteByte($FF);
+  WriteByte(Byte($D0 + (RegValue and 7)));
 end;
 
 procedure TASMInline.Ret;
 begin
-  writebyte($C3);
+  WriteByte($C3);
 end;
 
-procedure TASMInline.Ret(w: Word);
+{$ENDIF}
+
+function TASMInline.SaveAsMemory: Pointer;
+var
+  Buf: Pointer;
+  OldProtect: Cardinal;
 begin
-  if w = 0 then
-    ret() else begin
-    writebyte($C2);
-    writeword(w);
+  GetMem(Buf, Size);
+  if not VirtualProtect(Buf, SIZE_T(Size), PAGE_EXECUTE_READWRITE, OldProtect) then
+  begin
+    FreeMem(Buf);
+    RaiseLastOSError;
   end;
+{$IFDEF CPUX86}
+  Relocate(Buf);
+{$ENDIF}
+  Move(FBuffer.Memory^, Buf^, Size);
+  Result := Buf;
 end;
 
-procedure TASMInline.doSHL(mem: TMemoryAddress; amount: byte);
+function TASMInline.Size: Integer;
 begin
-  case mem.size of
-    ms16, ms32: begin
-        if mem.size = ms16 then WriteOpSizeOverride();
-
-        if amount = 1 then begin
-          writebyte($D1);
-          WriteRegRef(mem, 4);
-        end else begin
-          writebyte($C1);
-          WriteRegRef(mem, 4);
-          writebyte(amount);
-        end;
-      end;
-    ms8: begin
-        if amount = 1 then begin
-          writebyte($D0);
-          WriteRegRef(mem, 4);
-        end else begin
-          writebyte($C0);
-          WriteRegRef(mem, 4);
-          writebyte(amount);
-        end;
-      end;
-  else raise EOperandSizeMismatch.create();
-  end;
-end;
-
-procedure TASMInline.doSHL(mem: TMemoryAddress; amount: TCLRegister);
-begin
-  case mem.size of
-    ms16, ms32: begin
-        if mem.size = ms16 then
-          WriteOpSizeOverride;
-        writebyte($D3);
-        writeregref(mem, 4);
-      end;
-    ms8: begin
-        writebyte($D2);
-        writeregref(mem, 4);
-      end;
-  else raise EOperandSizeMismatch.create();
-  end;
-end;
-
-procedure TASMInline.doSHL(reg: TRegister8; amount: byte);
-begin
-  if amount = 1 then begin
-    writebyte($D0);
-    WriteRegRef(reg, 4);
-  end else begin
-    writebyte($C0);
-    WriteRegRef(reg, 4);
-    writebyte(amount);
-  end;
-end;
-
-procedure TASMInline.doSHL(reg: TRegister8; amount: TCLRegister);
-begin
-  writebyte($D2);
-  writeregref(reg, 4);
-end;
-
-procedure TASMInline.doSHL(reg: TRegister32; amount: byte);
-begin
-  if amount = 1 then begin
-    writebyte($D1);
-    WriteRegRef(reg, 4);
-  end else begin
-    writebyte($C1);
-    WriteRegRef(reg, 4);
-    writebyte(amount);
-  end;
-end;
-
-procedure TASMInline.doSHL(reg: TRegister32; amount: TCLRegister);
-begin
-  writebyte($D3);
-  writeregref(reg, 4);
-end;
-
-procedure TASMInline.doSHL(reg: TRegister16; amount: byte);
-begin
-  WriteOpSizeOverride;
-  if amount = 1 then begin
-    writebyte($D1);
-    WriteRegRef(reg, 4);
-  end else begin
-    writebyte($C1);
-    WriteRegRef(reg, 4);
-    writebyte(amount);
-  end;
-end;
-
-procedure TASMInline.doSHL(reg: TRegister16; amount: TCLRegister);
-begin
-  WriteOpSizeOverride;
-  writebyte($D3);
-  writeregref(reg, 4);
-end;
-
-procedure TASMInline.doSHR(mem: TMemoryAddress; amount: byte);
-begin
-  case mem.size of
-    ms16, ms32: begin
-        if mem.size = ms16 then
-          WriteOpSizeOverride;
-
-        if amount = 1 then begin
-          writebyte($D1);
-          WriteRegRef(mem, 5);
-        end else begin
-          writebyte($C1);
-          WriteRegRef(mem, 5);
-          writebyte(amount);
-        end;
-      end;
-    ms8: begin
-        if amount = 1 then begin
-          writebyte($D0);
-          WriteRegRef(mem, 5);
-        end else begin
-          writebyte($C0);
-          WriteRegRef(mem, 5);
-          writebyte(amount);
-        end;
-      end;
-  else raise EOperandSizeMismatch.create();
-  end;
-end;
-
-procedure TASMInline.doSHR(mem: TMemoryAddress; amount: TCLRegister);
-begin
-  case mem.size of
-    ms32: begin
-        writebyte($D3);
-        WriteRegRef(mem, 5);
-      end;
-    ms16: begin
-        WriteOpSizeOverride;
-        writebyte($D3);
-        WriteRegRef(mem, 5);
-      end;
-    ms8: begin
-        writebyte($D2);
-        writeregref(mem, 5);
-      end;
-  end;
-end;
-
-procedure TASMInline.doSHR(reg: TRegister8; amount: byte);
-begin
-  if amount = 1 then begin
-    writebyte($D0);
-    WriteRegRef(reg, 5);
-  end else begin
-    writebyte($C0);
-    WriteRegRef(reg, 5);
-    writebyte(amount);
-  end;
-end;
-
-procedure TASMInline.doSHR(reg: TRegister8; amount: TCLRegister);
-begin
-  writebyte($D2);
-  writeregref(reg, 5);
-end;
-
-procedure TASMInline.doSHR(reg: TRegister32; amount: byte);
-begin
-  if amount = 1 then begin
-    writebyte($D1);
-    WriteRegRef(reg, 5);
-  end else begin
-    writebyte($C1);
-    WriteRegRef(reg, 5);
-    writebyte(amount);
-  end;
-end;
-
-procedure TASMInline.doSHR(reg: TRegister32; amount: TCLRegister);
-begin
-  writebyte($D3);
-  writeregref(reg, 5);
-end;
-
-procedure TASMInline.doSHR(reg: TRegister16; amount: byte);
-begin
-  WriteOpSizeOverride;
-  if amount = 1 then begin
-    writebyte($D1);
-    WriteRegRef(reg, 5);
-  end else begin
-    writebyte($C1);
-    WriteRegRef(reg, 5);
-    writebyte(amount);
-  end;
-end;
-
-procedure TASMInline.doSHR(reg: TRegister16; amount: TCLRegister);
-begin
-  WriteOpSizeOverride;
-  writebyte($D3);
-  writeregref(reg, 5);
-end;
-
-procedure TASMInline.SAR(reg: TRegister8; amount: byte);
-begin
-  if amount = 1 then begin
-    writebyte($D0);
-    WriteRegRef(reg, 7);
-  end else begin
-    writebyte($C0);
-    WriteRegRef(reg, 7);
-    writebyte(amount);
-  end;
-end;
-
-procedure TASMInline.SAR(reg: TRegister8; amount: TCLRegister);
-begin
-  writebyte($D2);
-  writeregref(reg, 7);
-end;
-
-procedure TASMInline.SAR(mem: TMemoryAddress; amount: byte);
-begin
-  case mem.size of
-    ms32, ms16: begin
-        if mem.size = ms16 then WriteOpSizeOverride;
-
-        if amount = 1 then begin
-          writebyte($D1);
-          WriteRegRef(mem, 7);
-        end else begin
-          writebyte($C1);
-          WriteRegRef(mem, 7);
-          writebyte(amount);
-        end;
-      end;
-    ms8: begin
-        if amount = 1 then begin
-          writebyte($D0);
-          WriteRegRef(mem, 7);
-        end else begin
-          writebyte($C0);
-          WriteRegRef(mem, 7);
-          writebyte(amount);
-        end;
-      end;
-  else raise EOperandSizeMismatch.create();
-  end;
-end;
-
-procedure TASMInline.SAR(mem: TMemoryAddress; amount: TCLRegister);
-begin
-  case mem.size of
-    ms16, ms32: begin
-        if mem.size = ms16 then
-          WriteOpSizeOverride;
-        writebyte($D3);
-        writeregref(mem, 7);
-      end;
-    ms8: begin
-        writebyte($D2);
-        writeregref(mem, 7);
-      end;
-  else raise EOperandSizeMismatch.create();
-  end;
-end;
-
-procedure TASMInline.SAR(reg: TRegister32; amount: byte);
-begin
-  if amount = 1 then begin
-    writebyte($D1);
-    WriteRegRef(reg, 7);
-  end else begin
-    writebyte($C1);
-    WriteRegRef(reg, 7);
-    writebyte(amount);
-  end;
-end;
-
-procedure TASMInline.SAR(reg: TRegister32; amount: TCLRegister);
-begin
-  writebyte($D3);
-  writeregref(reg, 7);
-end;
-
-procedure TASMInline.SAR(reg: TRegister16; amount: byte);
-begin
-  WriteOpSizeOverride;
-  if amount = 1 then begin
-    writebyte($D1);
-    WriteRegRef(reg, 7);
-  end else begin
-    writebyte($C1);
-    WriteRegRef(reg, 7);
-    writebyte(amount);
-  end;
-end;
-
-procedure TASMInline.SAR(reg: TRegister16; amount: TCLRegister);
-begin
-  WriteOpSizeOverride;
-  writebyte($D3);
-  writeregref(reg, 7);
-end;
-
-procedure TASMInline.doNot(mem: TMemoryAddress);
-begin
-  case mem.size of
-    ms32, ms16: begin
-        if mem.size = ms16 then
-          WriteOpSizeOverride;
-        Writebyte($F7);
-        WriteRegRef(mem, 2);
-      end;
-    ms8: begin
-        writebyte($F6);
-        WriteRegRef(mem, 2);
-      end;
-  else raise EOperandSizeMismatch.create;
-  end;
-end;
-
-procedure TASMInline.doNot(reg: TRegister32);
-begin
-  Writebyte($F7);
-  WriteRegRef(reg, 2);
-end;
-
-procedure TASMInline.doNot(reg: TRegister8);
-begin
-  writebyte($F6);
-  WriteRegRef(reg, 2);
-end;
-
-procedure TASMInline.doNot(reg: TRegister16);
-begin
-  WriteOpSizeOverride;
-  writebyte($F7);
-  WriteRegRef(reg, 2);
-end;
-
-procedure TASMInline.Pop(reg: TRegister32);
-begin
-  writebyte($58 + regnum(reg));
-end;
-
-procedure TASMInline.Jmp(const labelname: string);
-begin
-  WriteByte($E9);
-  AddLabelRef(fbuffer.position, -(fbuffer.position + 4), rt32bit, labelname);
-  WriteLongword(0); //dummy space for the label target
-end;
-
-procedure TASMInline.Jmp(target: pointer);
-begin
-  writebyte($E9);
-  AddRelocation(fbuffer.position, rt32bit);
-  WriteInteger(integer(target) - (integer(fBase) + fbuffer.Position + 4));
-end;
-
-procedure TASMInline.doLabel(const name: string);
-begin
-  if not flabels.AddLabel(name, fbuffer.Position) then
-    raise exception.create('Duplicate label identifier ''' + name + '''');
-end;
-
-procedure TASMInline.db(b: byte);
-begin
-  WriteByte(b);
-end;
-
-procedure TASMInline.dw(w: word);
-begin
-  WriteWord(w);
-end;
-
-procedure TASMInline.dd(dw: longword);
-begin
-  WriteLongWord(dw);
-end;
-
-procedure TASMInline.Call(target: pointer);
-begin
-  writebyte($E8);
-  AddRelocation(fbuffer.position, rt32Bit);
-  WriteInteger(integer(target) - (integer(fBase) + fbuffer.Position + 4));
-end;
-
-procedure TASMInline.Call(reg: TRegister32);
-begin
-  writebyte($FF);
-  WriteRegRef(reg, 2);
-end;
-
-procedure TASMInline.Push(mem: TRegister32Set);
-begin
-  push(addr(SingleMember(mem)));
-end;
-
-procedure TASMInline.Push(mem: TMemoryAddress);
-begin
-  writebyte($FF);
-  WriteRegRef(mem, 6);
-end;
-
-procedure TASMInline.Push(lw: longword);
-begin
-  {bytes get sign extended. Only push as byte if it won't end up being
-  interpreted as negative..}
-  if lw < 128 then begin
-    writebyte($6A);
-    writebyte(lw and $FF);
-  end else begin //write a longword
-    writebyte($68);
-    writelongword(lw);
-  end;
-end;
-
-procedure TASMInline.Push(reg: TRegister16);
-begin
-  WriteOpSizeOverride;
-  writebyte($50 + regnum(reg));
-end;
-
-procedure TASMInline.Push(reg: TRegister32);
-begin
-  writebyte($50 + regnum(reg));
-end;
-
-procedure TASMInline.WriteRegRef(reg1: TRegister8; opcodeext: byte);
-begin
-  writebyte(EncodeModRM(3, opcodeext, regnum(reg1)));
-end;
-
-procedure TASMInline.WriteRegRef(reg1: TRegister16; opcodeext: byte);
-begin
-  writebyte(EncodeModRM(3, opcodeext, regnum(reg1)));
-end;
-
-procedure TASMInline.WriteRegRef(reg1: TRegister32; opcodeext: byte);
-begin
-  writebyte(EncodeModRM(3, opcodeext, regnum(reg1)));
-end;
-
-procedure TASMInline.WriteRegRef(reg1: TRegister32; reg2: TRegister32);
-begin
-  writebyte(EncodeModRM(ModModeNum(mmNaked), regnum(reg2), regnum(reg1)));
-end;
-
-procedure TASMInline.WriteRegRef(reg1: TRegister16; reg2: TRegister16);
-begin
-  WriteByte(EncodeModRM(ModModeNum(mmNaked), regnum(reg2), regnum(reg1)));
-end;
-
-procedure TASMInline.WriteRegRef(reg1: TRegister8; reg2: TRegister8);
-begin
-  WriteByte(EncodeModRM(ModModeNum(mmNaked), regnum(reg2), regnum(reg1)));
-end;
-
-procedure TASMInline.WriteRegRef(mem: TMemoryAddress; opcodeext: byte);
-begin
-  writeregref(opcodeext, mem.base, true, mem.index, mem.offset, mem.scale, mem.usebase);
-end;
-
-procedure TASMInline.WriteRegRef(mem: TMemoryAddress; reg: TRegister8);
-begin
-  writeregref(regnum(reg), mem.base, true, mem.index, mem.offset, mem.scale, mem.usebase);
-end;
-
-procedure TASMInline.WriteRegRef(mem: TMemoryAddress; reg: TRegister16);
-begin
-  writeregref(regnum(reg), mem.base, true, mem.index, mem.offset, mem.scale, mem.usebase);
-end;
-
-procedure TASMInline.WriteRegRef(mem: TMemoryAddress; reg: TRegister32);
-begin
-  writeregref(reg, mem.base, true, mem.index, mem.offset, mem.scale, mem.usebase);
-end;
-
-//Write the MODR/M and SIB byte for the given register or memory reference
-
-procedure TASMInline.WriteRegRef(reg: TRegister32; base: TRegister32; deref: boolean; index: TRegister32 = EAX; Offset: integer = 0; Scale: byte = 0; usebase: boolean = true);
-begin
-  WriteRegRef(regnum(reg), base, deref, index, Offset, scale, usebase);
-end;
-
-procedure TASMInline.WriteRegRef(reg: byte; base: TRegister32; deref: boolean; index: TRegister32; Offset: integer; Scale: byte; usebase: boolean);
-type TOffSize = (osNone, os8, os32);
-var mode: TModMode;
-  offsize: TOffSize;
-  useSIB: boolean;
-  areg, arm: Byte;
-begin
-  if not deref then begin
-    mode := mmNaked;
-    offsize := osNone;
-  end else
-    if usebase = false then begin
-      offsize := os32;
-      mode := mmDeref;
-      base := EBP; //the "no base" value
-    end else
-      if Offset = 0 then begin
-        mode := mmDeref;
-        offsize := osNone;
-      end else
-        if (offset >= -128) and (offset < 128) then begin //signed byte
-          mode := mmDisp8;
-          offsize := os8;
-        end else begin
-          mode := mmDisp32;
-          offsize := os32;
-        end;
-
-  if (mode <> mmnaked) then begin
-    usesib := (Scale > 0) or (base = ESP);
-  end else usesib := false;
-
-  if useSIB then begin //calculate scale, easiest just to use a case statement..
-    case scale of
-      0: begin //dont want an index value
-          index := ESP; //"none" value
-        end;
-      1: scale := 0;
-      2: scale := 1;
-      4: scale := 2;
-      8: scale := 3;
-    else raise exception.create('Invalid scale, valid values are 1,2,4,8.');
-    end;
-  end;
-
-  if (not useSIB) and (mode = mmDeref) and (base = EBP) then begin
-  //not available, use [EBP+0] instead
-    mode := mmDisp8;
-    offsize := os8;
-    Offset := 0;
-  end;
-
-  arm := regnum(base);
-  areg := reg;
-
-  if usesib then
-    WriteByte(EncodeModRM(ModModeNum(mode), areg, 4)) else
-    WriteByte(EncodeModRM(ModModeNum(mode), areg, arm));
-
-  if usesib then begin
-    WriteByte(EncodeSIB(Scale, regnum(index), regnum(base)));
-  end;
-
-    //Do we have to append an offset?
-  case offsize of
-    os8: WriteByte(byte(offset)); //ignore sign..
-    os32: writelongword(longword(offset));
-  end;
-end;
-
-procedure TASMInline.Nop;
-begin
-  WriteByte($90);
-end;
-
-procedure TASMInline.Mov(reg1: TRegister32Set; i: longword);
-begin
-  mov(addr(singlemember(reg1)), i);
-end;
-
-procedure TASMInline.Mov(mem: TMemoryAddress; i: longword);
-begin
-  case mem.size of
-    ms8: begin
-        if i > high(byte) then
-          raise EOperandSizeMismatch.create;
-        writebyte($C6);
-        WriteRegRef(mem, 0);
-        writebyte(i);
-      end;
-    ms16: begin
-        if i > high(word) then
-          raise EOperandSizeMismatch.create;
-        WriteOpSizeOverride();
-        writebyte($C7);
-        WriteRegRef(mem, 0);
-        writeword(i);
-      end;
-    ms32: begin
-        writebyte($C7);
-        WriteRegRef(mem, 0);
-        writelongword(i);
-      end;
-  else raise EOperandSizeMismatch.create;
-  end;
-end;
-
-procedure TASMInline.Mov(mem: TMemoryAddress; reg: TRegister32);
-begin
-  require(mem.size, ms32);
-  WriteByte($89);
-  WriteRegRef(mem, reg);
-end;
-
-procedure TASMInline.Mov(mem: TMemoryAddress; reg: TRegister16);
-begin
-  require(mem.size, ms16);
-  WriteOpSizeOverride;
-  WriteByte($89);
-  WriteRegRef(mem, reg);
-end;
-
-procedure TASMInline.Mov(mem: TMemoryAddress; reg: TRegister8);
-begin
-  require(mem.size, ms8);
-  WriteByte($88);
-  WriteRegRef(mem, reg);
-end;
-
-procedure TASMInline.Mov(reg: TRegister32; mem: TMemoryAddress);
-begin
-  require(mem.size, ms32);
-  WriteByte($8B);
-  WriteRegRef(mem, reg);
-end;
-
-procedure TASMInline.Mov(reg: TRegister16; mem: TMemoryAddress);
-begin
-  require(mem.size, ms16);
-  WriteOpSizeOverride;
-  WriteByte($8B);
-  WriteRegRef(mem, reg);
-end;
-
-procedure TASMInline.Mov(reg: TRegister8; mem: TMemoryAddress);
-begin
-  require(mem.size, ms8);
-  WriteByte($8A);
-  WriteRegRef(mem, reg);
-end;
-
-procedure TASMInline.Mov(reg1: TRegister32Set; reg2: TRegister32);
-begin
-  Mov(addr(singlemember(reg1)), reg2);
-end;
-
-procedure TASMInline.Mov(reg1: TRegister32; reg2: TRegister32Set);
-begin
-  mov(reg1, addr(singlemember(reg2)));
-end;
-
-procedure TASMInline.Mov(reg1: TRegister8; reg2: TRegister8);
-begin
-  WriteByte($88);
-  WriteRegRef(reg1, reg2);
-end;
-
-procedure TASMInline.Mov(reg1: TRegister16; reg2: TRegister16);
-begin
-  WriteOpSizeOverride;
-  writebyte($89);
-  WriteRegRef(reg1, reg2);
-end;
-
-procedure TASMInline.Mov(reg1: TRegister32; reg2: TRegister32);
-begin
-  writebyte($89);
-  WriteRegRef(reg1, reg2);
-end;
-
-procedure TASMInline.Mov(reg: TRegister8; b: byte);
-begin
-  writebyte($B0 + regnum(reg));
-  writebyte(b);
-end;
-
-procedure TASMInline.Mov(reg: TRegister16; b: word);
-begin
-  WriteOpSizeOverride;
-  writebyte($B8 + regnum(reg));
-  writeword(b);
+  if FBuffer.Size > High(Integer) then
+    raise Exception.Create('Слишком большой блок машинного кода');
+  Result := Integer(FBuffer.Size);
 end;
 
-procedure TASMInline.Mov(reg: TRegister32; b: longword);
+procedure TASMInline.WriteByte(const B: Byte);
 begin
-  writebyte($B8 + regnum(reg));
-  writelongword(b);
+  FBuffer.WriteBuffer(B, SizeOf(B));
 end;
 
-constructor TASMInline.create;
+procedure TASMInline.WriteInteger(const I: Integer);
 begin
-  fbuffer := tmemorystream.create;
-  frelocs := tobjectlist.create;
-  flabels := TLabelList.create;
-  flabelrefs := TObjectlist.create;
+  FBuffer.WriteBuffer(I, SizeOf(I));
 end;
 
-destructor TASMInline.destroy;
+{$IFNDEF CPUX86}
+procedure TASMInline.WriteUInt64(const U: UInt64);
 begin
-  fbuffer.free;
-  frelocs.free;
-  flabels.free;
-  flabelrefs.free;
-  inherited;
+  FBuffer.WriteBuffer(U, SizeOf(U));
 end;
+{$ENDIF}
 
 end.
-

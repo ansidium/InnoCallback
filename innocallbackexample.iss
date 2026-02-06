@@ -1,74 +1,62 @@
-#define MyAppName "My Program"
-#define MyAppVerName "My Program 1.5"
-#define MyAppPublisher "My Company, Inc."
-#define MyAppURL "http://www.mycompany.com"
+#define MyAppName "InnoCallback Example"
+#define MyAppVersion "1.0"
+#define MyAppPublisher "Inno Tools"
 
 [Setup]
 AppName={#MyAppName}
-AppVerName={#MyAppVerName}
+AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-AppPublisherURL={#MyAppURL}
-AppSupportURL={#MyAppURL}
-AppUpdatesURL={#MyAppURL}
 CreateAppDir=no
-OutputBaseFilename=setup
-Compression=lzma
+OutputBaseFilename=innocallback-example
+Compression=lzma2
 SolidCompression=yes
+WizardStyle=modern
 
 [Languages]
-Name: english; MessagesFile: compiler:Default.isl
+Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
-Source: InnoCallback.dll; DestDir: {tmp}; Flags: dontcopy
+Source: "InnoCallback.dll"; DestDir: "{tmp}"; Flags: dontcopy
 
 [Code]
-(*
-Inno Tools InnoCallback
-Copyright (C) Sherlock Software 2006
-Version 0.1 Alpha
-
-This example shows how you can create a stdcall callback that external DLLs can call.
-In this example, we will create a timer using the Windows API. Windows will call our
-callback where we will randomly change the background color of the Welcome page.
-
-Contact:
- The author, Nicholas Sherlock, at nick@sherlocksoftware.org. Comments, questions and suggestions welcome.
-
-Website:
- http://www.sherlocksoftware.org
-*)
-
 type
- TTimerProc=procedure(h:longword; msg:longword; idevent:longword; dwTime:longword);
- TMyCallback=function(a,b,c:integer):integer;
+  TTimerProc = procedure(hWnd: Cardinal; Msg: Cardinal; idEvent: NativeUInt; dwTime: Cardinal);
 
-function WrapTimerProc(callback:TTimerProc; paramcount:integer):longword;
-  external 'wrapcallback@files:innocallback.dll stdcall';
+function WrapTimerProc(const Callback: TTimerProc; const ParamCount: Integer): NativeInt;
+  external 'wrapcallback@files:InnoCallback.dll stdcall setuponly';
 
-function WrapMyCallback(callback:TMyCallBack; paramcount:integer):longword;
-  external 'wrapcallback@files:innocallback.dll stdcall';
-
-function SetTimer(hWnd: longword; nIDEvent, uElapse: longword; lpTimerFunc: longword): longword;
+function SetTimer(hWnd, nIDEvent, uElapse: Cardinal; lpTimerFunc: NativeInt): Cardinal;
   external 'SetTimer@user32.dll stdcall';
 
-//Note, we musn't declare our routine as Stdcall
-procedure mytimerproc(h:longword; msg:longword; idevent:longword; dwTime:longword);
+function KillTimer(hWnd, uIDEvent: Cardinal): Boolean;
+  external 'KillTimer@user32.dll stdcall';
+
+var
+  TimerId: Cardinal;
+  TimerCallback: NativeInt;
+
+procedure MyTimerProc(hWnd: Cardinal; Msg: Cardinal; idEvent: NativeUInt; dwTime: Cardinal);
 begin
-	pagefromid(wpWelcome).surface.color:=random($FFFFFF);end;
+  { Показываем, что callback реально вызывается из WinAPI. }
+  WizardForm.WelcomePage.SurfaceColor := Random($FFFFFF);
+end;
 
-{This callback isn't used in this example, but it shows how you should
- duplicate the Wrap() procedures to wrap different functions}
-function mycallback(a,b,c:integer):integer;
+function InitializeSetup: Boolean;
 begin
-   result:=a*b*c;end;
+  Randomize;
 
-function InitializeSetup:boolean;
-var timercallback,callback:longword;
+  { Упаковываем script-метод в stdcall callback. }
+  TimerCallback := WrapTimerProc(@MyTimerProc, 4);
+  TimerId := SetTimer(0, 0, 1000, TimerCallback);
+
+  if TimerId = 0 then
+    MsgBox('Не удалось создать таймер Windows API.', mbError, MB_OK);
+
+  Result := True;
+end;
+
+procedure DeinitializeSetup;
 begin
- timercallback:=WrapTimerProc(@mytimerproc,4); //Our proc has 4 arguments
- callback:=WrapMyCallback(@mycallback,3); //Our proc has 3 arguments
-
- settimer(0,0,1000,timercallback); //Create a timer and give it our callback as an argument
-
- result:=true; //keep loading setup..
+  if TimerId <> 0 then
+    KillTimer(0, TimerId);
 end;

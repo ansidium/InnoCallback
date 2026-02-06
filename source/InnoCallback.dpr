@@ -1,10 +1,8 @@
 library InnoCallback;
 
 uses
-  SysUtils,
-  Classes,
-  innocallbackengine in 'innocallbackengine.pas',
-  ASMInline in 'ASMInline.pas';
+  ASMInline in 'ASMInline.pas',
+  InnoCallbackEngine in 'innocallbackengine.pas';
 
 begin
 end.
