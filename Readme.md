@@ -20,7 +20,7 @@
 ## Экспорт
 
 ```pascal
-function WrapCallback(const Proc: TMethod; const ParamCount: Integer): NativeInt; stdcall;
+function WrapCallback(Proc: TMethod; ParamCount: Integer): NativeInt; stdcall;
 exports
   WrapCallback name 'wrapcallback';
 ```
